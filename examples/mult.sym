@@ -1,0 +1,10 @@
+// Symbol table
+// Scope level 0:
+//	Symbol Name       Page Address
+//	----------------  ------------
+//	LOOP              x3003
+//	DONE              x3008
+//	NUM1              x300C
+//	NUM2              x300D
+//	RESULT            x300E
+//	MSG               x300F

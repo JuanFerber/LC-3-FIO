@@ -1,0 +1,9 @@
+// Symbol table
+// Scope level 0:
+//	Symbol Name       Page Address
+//	----------------  ------------
+//	PRINT_LOOP        x3003
+//	CHAR_NINE         x300F
+//	SPACE_CHAR        x3010
+//	NEWLINE           x3011
+//	SAVED_R0          x3012

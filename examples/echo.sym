@@ -1,0 +1,12 @@
+// Symbol table
+// Scope level 0:
+//	Symbol Name       Page Address
+//	----------------  ------------
+//	ECHO_LOOP         x3002
+//	EXIT_ECHO         x300E
+//	WELCOME_MSG       x3011
+//	ECHO_MSG          x3054
+//	BYE_MSG           x3069
+//	NEG_Q             x3072
+//	NEWLINE           x3073
+//	CHAR_BUF          x3074
