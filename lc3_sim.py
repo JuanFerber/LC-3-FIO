@@ -6,6 +6,7 @@ manejo de registros, memoria mapeada (MMIO) y rutinas de TRAP.
 
 import sys
 import os
+import time
 from typing import Optional, List, Dict
 from lc3_core import (
     MEMORY_SIZE, MASK_16, SIGN_BIT_16, NUM_REGISTERS,
@@ -16,6 +17,7 @@ from lc3_core import (
     MR_KBSR, MR_KBDR, MR_DSR, MR_DDR, MR_MCR,
     sign_extend, to_uint16, to_int16, get_cc_name, disassemble_instruction
 )
+from lc3_os import get_os_image
 
 # Soporte para entrada de teclado no bloqueante en Windows
 try:
@@ -40,10 +42,30 @@ class LC3Simulator:
         self.output_fn = None
         self.input_fn = None
         self.has_input_fn = None
+        self.kbsr_poll_fn = None
+
+        # Modo de ejecución de TRAP: si es True, se ejecuta el código del SO en memoria
+        self.os_traps_enabled = True
+        self.os_symbols = {}
+        self._halt_saved_regs = None
+        self._halt_saved_cond = None
 
         # Inicializar registros MMIO
         self.memory[MR_DSR] = 0x8000  # Pantalla lista
         self.memory[MR_MCR] = 0x8000  # Reloj habilitado
+
+        # Cargar el Sistema Operativo (Tabla de Vectores y manejadores TRAP)
+        self.load_os()
+
+    def load_os(self):
+        """Carga la imagen del Sistema Operativo LC-3 en memoria y registra sus símbolos."""
+        os_mem, os_sym = get_os_image()
+        self.os_symbols = os_sym
+        for addr, val in os_mem.items():
+            self.memory[addr] = val
+        for addr, name in os_sym.items():
+            if addr not in self.symbols:
+                self.symbols[addr] = name
 
     def _output_text(self, text: str):
         """Envía texto a la consola o al callback configurado de la GUI."""
@@ -54,14 +76,18 @@ class LC3Simulator:
             sys.stdout.flush()
 
     def reset(self, start_pc: int = 0x3000):
-        """Reinicia el estado del procesador conservando la memoria."""
+        """Reinicia el estado del procesador conservando la memoria y recargando el SO."""
         self.reg = [0] * NUM_REGISTERS
         self.pc = start_pc & MASK_16
         self.cond = FL_ZRO
         self.running = False
         self.instruction_count = 0
+        self._halt_saved_regs = None
+        self._halt_saved_cond = None
         self.memory[MR_DSR] = 0x8000
         self.memory[MR_MCR] = 0x8000
+        if self.os_traps_enabled:
+            self.load_os()
 
     def load_obj(self, filename: str) -> int:
         """
@@ -141,26 +167,37 @@ class LC3Simulator:
 
         # Registro de estado de teclado (KBSR)
         if address == MR_KBSR:
+            has_input = False
             if self.has_input_fn:
-                if self.has_input_fn():
+                has_input = bool(self.has_input_fn())
+                self.memory[MR_KBSR] = 0x8000 if has_input else 0x0000
+            elif HAS_MSVCRT:
+                if msvcrt.kbhit():
+                    has_input = True
                     self.memory[MR_KBSR] = 0x8000
                 else:
                     self.memory[MR_KBSR] = 0x0000
-            elif HAS_MSVCRT and msvcrt.kbhit():
-                self.memory[MR_KBSR] = 0x8000
-                ch = self._read_char()
-                self.memory[MR_KBDR] = ch & 0xFF
+                    time.sleep(0.001)
             else:
                 self.memory[MR_KBSR] = 0x0000
+
+            if getattr(self, "kbsr_poll_fn", None):
+                self.kbsr_poll_fn(has_input)
+
             return self.memory[MR_KBSR]
 
         # Registro de datos de teclado (KBDR)
         elif address == MR_KBDR:
-            if self.has_input_fn:
+            if self.input_fn:
+                ch = self.input_fn()
+                self.memory[MR_KBDR] = ch & 0xFF
+            elif HAS_MSVCRT:
                 ch = self._read_char()
                 self.memory[MR_KBDR] = ch & 0xFF
             val = self.memory[MR_KBDR]
-            self.memory[MR_KBSR] = 0x0000  # Limpiar bandera de teclado
+            self.memory[MR_KBSR] = 0x0000  # Limpiar bandera de teclado al leer datos
+            if getattr(self, "kbsr_poll_fn", None):
+                self.kbsr_poll_fn(True)
             return val
 
         elif address == MR_DSR:
@@ -180,6 +217,12 @@ class LC3Simulator:
         elif address == MR_MCR:
             if not (val & 0x8000):
                 self.running = False
+                # Restaurar registros y flags de condición del usuario tras HALT
+                if self._halt_saved_regs is not None:
+                    self.reg = list(self._halt_saved_regs)
+                    self.cond = self._halt_saved_cond
+                    self._halt_saved_regs = None
+                    self._halt_saved_cond = None
             self.memory[MR_MCR] = val
         else:
             self.memory[address] = val
@@ -350,9 +393,19 @@ class LC3Simulator:
             self.mem_write(target, self.reg[sr])
 
         elif op == OP_TRAP:
-            self.reg[7] = self.pc
             trapvect = instr & 0xFF
-            self.handle_trap(trapvect)
+            self.reg[7] = self.pc
+            if self.os_traps_enabled:
+                if trapvect == TRAP_HALT:
+                    self._halt_saved_regs = list(self.reg)
+                    self._halt_saved_cond = self.cond
+                vector_addr = self.mem_read(trapvect)
+                if vector_addr != 0:
+                    self.pc = vector_addr
+                else:
+                    self.handle_trap(trapvect)
+            else:
+                self.handle_trap(trapvect)
 
         elif op == OP_RTI:
             # En modo simulador educativo simple no interrumpe

@@ -3,12 +3,13 @@
 Este proyecto proporciona un entorno completo, pedagógico y funcional para la arquitectura **LC-3** desarrollado en **Python puro** (compatible con Python 3.8+ y probado en Python 3.14+). Incluye:
 
 1. **Interfaz Gráfica de Usuario (GUI)** (`lc3_gui.py`): entorno de escritorio completo con editor integrado, desensamblador en vivo, seguimiento de PC, puntos de interrupción interactivos, visor/editor de memoria y registros, consola de E/S y control de velocidad.
-2. **Ensamblador de dos pasadas** (`lc3_assembler.py`): traduce código fuente `.asm` a binarios `.obj` en formato estándar big-endian y genera tablas de símbolos `.sym` y volcados `.hex`.
-3. **Simulador y Máquina Virtual** (`lc3_sim.py`): emula fielmente la arquitectura con ciclo fetch-decode-execute, memoria de 64K palabras, registros R0–R7, códigos de condición (N, Z, P), servicios de interrupción TRAP y registros de E/S mapeados en memoria (MMIO).
-4. **Depurador interactivo de consola** (`lc3_debugger.py`): permite depuración paso a paso (`step`, `next`), puntos de interrupción por dirección o nombre de etiqueta, desensamblado dinámico e inspección y edición de memoria y registros.
-5. **CLI Unificada** (`lc3.py`): interfaz de comandos sencilla y amigable (lanza la GUI por defecto o permite subcomandos `asm`, `run`, `debug`, `test`, `gui`).
-6. **Programas de ejemplo** (`examples/`): programas listos para ensamblar y ejecutar.
-7. **Suite de pruebas unitarias** (`test_lc3.py`): verificación automática de la codificación y ejecución de instrucciones.
+2. **Sistema Operativo LC-3 en Memoria** (`lc3_os.py`): tabla de vectores de interrupción (`x0020`–`x0025`) y manejadores TRAP en lenguaje ensamblador que emulan fielmente el comportamiento de sondeo (polling) sobre registros MMIO (`KBSR`, `KBDR`, `DSR`, `DDR`, `MCR`).
+3. **Ensamblador de dos pasadas** (`lc3_assembler.py`): traduce código fuente `.asm` a binarios `.obj` en formato estándar big-endian y genera tablas de símbolos `.sym` y volcados `.hex`.
+4. **Simulador y Máquina Virtual** (`lc3_sim.py`): emula fielmente la arquitectura con ciclo fetch-decode-execute, memoria de 64K palabras, registros R0–R7, códigos de condición (N, Z, P), servicios de interrupción TRAP mediante hardware linkage y registros de E/S mapeados en memoria (MMIO).
+5. **Depurador interactivo de consola** (`lc3_debugger.py`): permite depuración paso a paso (`step`, `next`), puntos de interrupción por dirección o nombre de etiqueta, desensamblado dinámico e inspección y edición de memoria y registros.
+6. **CLI Unificada** (`lc3.py`): interfaz de comandos sencilla y amigable (lanza la GUI por defecto o permite subcomandos `asm`, `run`, `debug`, `test`, `gui`).
+7. **Programas de ejemplo** (`examples/`): programas listos para ensamblar y ejecutar.
+8. **Suite de pruebas unitarias** (`test_lc3.py`): 14 pruebas automáticas de la codificación, ejecución de instrucciones y rutinas del Sistema Operativo.
 
 ---
 
@@ -19,10 +20,11 @@ G:\Roberto\arquitectura de computadoras\lab3\
 ├── lc3_gui.py          # Interfaz gráfica de escritorio moderna con Tkinter
 ├── lc3.py              # CLI principal (gui, asm, run, debug, test)
 ├── lc3_core.py         # Definición de la ISA (registros, flags, opcodes, desensamblador)
+├── lc3_os.py           # Imagen y código ensamblador del Sistema Operativo LC-3 (Vectores TRAP y MMIO)
 ├── lc3_assembler.py    # Ensamblador de dos pasadas y generador de .obj / .sym / .hex
 ├── lc3_sim.py          # Simulador / Máquina Virtual (CPU, ciclo de instrucción, TRAPs, MMIO)
 ├── lc3_debugger.py     # Depurador interactivo en consola estilo GDB
-├── test_lc3.py         # Suite de pruebas unitarias automatizadas
+├── test_lc3.py         # Suite de pruebas unitarias automatizadas (14 tests)
 ├── README.md           # Esta guía de uso y documentación técnica
 └── examples/           # Programas de prueba en ensamblador LC-3
     ├── hello.asm       # Imprime "Hello, World!" con PUTS
@@ -54,9 +56,46 @@ G:\Roberto\arquitectura de computadoras\lab3\
     - `PUTSP`(`TRAP x24`): Imprime cadena empaquetada (2 caracteres por palabra).
     - `HALT` (`TRAP x25`): Detiene el procesador.
 - **E/S Mapeada en Memoria (MMIO)**:
-  - `KBSR` (`0xFE00`) / `KBDR` (`0xFE02`): Estado y datos del teclado.
-  - `DSR` (`0xFE04`) / `DDR` (`0xFE06`): Estado y datos de la pantalla.
-  - `MCR` (`0xFFFE`): Control del reloj de la máquina.
+  - `KBSR` (`0xFE00`): Registro de estado del teclado. Bit 15 es 1 cuando hay una nueva tecla lista; 0 en caso contrario.
+  - `KBDR` (`0xFE02`): Registro de datos del teclado. Contiene el código ASCII de la tecla y limpia el bit 15 de `KBSR` al leerse.
+  - `DSR` (`0xFE04`): Registro de estado de la pantalla. Bit 15 es 1 cuando la pantalla está lista para recibir un nuevo carácter.
+  - `DDR` (`0xFE06`): Registro de datos de la pantalla. Al escribir un código ASCII aquí, se muestra en la consola.
+  - `MCR` (`0xFFFE`): Registro de control de la máquina. Bit 15 habilita el reloj del procesador; ponerlo en 0 detiene la simulación (`HALT`).
+
+---
+
+## Sistema Operativo LC-3 y Emulación de Sondeo (Polling)
+
+A diferencia de emuladores que interceptan las llamadas TRAP directamente en código de alto nivel, este simulador implementa el **Sistema Operativo auténtico de la LC-3** cargado en la memoria de la máquina virtual (`lc3_os.py`):
+
+1. **Tabla de Vectores TRAP (`x0020` – `x0025`)**:
+   - `x0020` (GETC)  $\rightarrow$ apunta al manejador en `x0200`
+   - `x0021` (OUT)   $\rightarrow$ apunta al manejador en `x0206`
+   - `x0022` (PUTS)  $\rightarrow$ apunta al manejador en `x020F`
+   - `x0023` (IN)    $\rightarrow$ apunta al manejador en `x0223`
+   - `x0024` (PUTSP) $\rightarrow$ apunta al manejador en `x0246`
+   - `x0025` (HALT)  $\rightarrow$ apunta al manejador en `x0273`
+
+2. **Mecanismo de Linkage por Hardware**:
+   - Al ejecutarse la instrucción `TRAP trapvect8`, la CPU almacena la dirección de retorno en `R7` (`R7 = PC`) y carga en el contador de programa la dirección del manejador leída desde la tabla de vectores: `PC = mem[trapvect8]`.
+
+3. **Bucles de Sondeo en Ensamblador (Polling)**:
+   - Los manejadores del SO ejecutan bucles reales de sondeo sobre los registros de dispositivo:
+     ```assembly
+     ; Bucle de sondeo del teclado en GETC
+     GETC_POLL:
+         LDI  R0, OS_KBSR_PTR   ; Lee KBSR (xFE00)
+         BRzp GETC_POLL         ; Si bit 15 es 0 (no hay tecla), sigue sondeando
+         LDI  R0, OS_KBDR_PTR   ; Lee el carácter desde KBDR (xFE02)
+         RET                    ; Retorna al programa de usuario con JMP R7
+     ```
+   - Al ejecutar `OUT`, el SO sondea `DSR` (`xFE04`) hasta que la pantalla esté lista antes de escribir en `DDR` (`xFE06`).
+   - Al ejecutar `HALT`, el manejador imprime el aviso de parada con `PUTS`, lee `MCR` (`xFFFE`), limpia el bit 15 y escribe el nuevo valor (`x7FFF`), deteniendo el reloj de la CPU.
+
+4. **Depuración Pedagógica (Paso a Paso vs Paso Sobre)**:
+   - **Paso a Paso (`Step` / `F11`)**: permite ingresar a los manejadores del SO en `x0200` y observar instrucción a instrucción el sondeo de `KBSR`, la lectura de `KBDR` y el retorno con `RET`.
+   - **Paso Sobre (`Step Over` / `F12`)**: ejecuta el TRAP completo hasta la instrucción siguiente en el espacio de usuario, facilitando la depuración de alto nivel sin perder interactividad.
+   - **Integración fluida con la GUI**: durante el sondeo del teclado, la GUI detecta la espera de entrada en `KBSR`, ilumina la caja de texto en amarillo, enfoca el cursor y muestra el estado `"ESPERANDO ENTRADA"` sin bloquear la interfaz.
 
 ---
 

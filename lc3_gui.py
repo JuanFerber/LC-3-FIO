@@ -33,6 +33,7 @@ class LC3GUI(tk.Tk):
         # Instancia del simulador
         self.sim = LC3Simulator()
         self.orig_pc = 0x3000
+        self.disasm_base_addr = 0x3000
         self.current_file: Optional[str] = None
         self.breakpoints: Set[int] = set()
 
@@ -42,11 +43,13 @@ class LC3GUI(tk.Tk):
         self.waiting_for_input = False
         self.input_buffer = []
         self.input_var = tk.StringVar(self, value="")
+        self._step_over_target: Optional[int] = None
 
         # Redirigir E/S del simulador
         self.sim.output_fn = self._handle_sim_output
         self.sim.input_fn = self._handle_sim_input
         self.sim.has_input_fn = lambda: len(self.input_buffer) > 0
+        self.sim.kbsr_poll_fn = self._on_kbsr_poll
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -382,8 +385,31 @@ class LC3GUI(tk.Tk):
         self.txt_console.insert(tk.END, text)
         self.txt_console.see(tk.END)
 
+    def _on_kbsr_poll(self, has_input: bool):
+        """Callback invocado cuando el procesador LC-3 sondea KBSR (xFE00)."""
+        if not has_input:
+            if not self.waiting_for_input:
+                self.waiting_for_input = True
+                self.lbl_cpu_state.config(text="ESPERANDO ENTRADA", bg="#F57C00")
+                self.lbl_status.config(text="Esperando entrada del teclado (sondeando KBSR en el SO LC-3)...")
+                try:
+                    self.ent_console_in.config(background="#FFF9C4")
+                except Exception:
+                    pass
+                self.ent_console_in.focus_set()
+        else:
+            if self.waiting_for_input:
+                self.waiting_for_input = False
+                try:
+                    self.ent_console_in.config(background="#FFFFFF")
+                except Exception:
+                    pass
+                if self.is_running:
+                    self.lbl_cpu_state.config(text="EJECUTANDO", bg="#1976D2")
+                    self.lbl_status.config(text="Carácter detectado en KBSR. Continuando ejecución...")
+
     def _handle_sim_input(self) -> int:
-        """Callback llamado por el simulador para leer un carácter (GETC, IN)."""
+        """Callback llamado por el simulador para leer un carácter (GETC, IN, KBDR)."""
         # Si ya hay caracteres acumulados en el búfer, devolver el primero de inmediato
         if self.input_buffer:
             return self.input_buffer.pop(0)
@@ -434,7 +460,7 @@ class LC3GUI(tk.Tk):
 
     def _on_console_keypress(self, event):
         """Permite ingresar un carácter presionando una tecla directamente en el área de terminal."""
-        if self.waiting_for_input and event.char:
+        if (self.waiting_for_input or self.is_running) and event.char:
             char_code = ord(event.char)
             if char_code == 13:
                 char_code = 10
@@ -453,8 +479,7 @@ class LC3GUI(tk.Tk):
             # Si presiona Enter sin texto, enviar código de salto de línea '\n' (10)
             self.input_buffer.append(10)
 
-        if self.waiting_for_input:
-            self.input_var.set("input_received")
+        self.input_var.set("input_received")
 
     def _on_clear_console(self):
         self.txt_console.delete("1.0", tk.END)
@@ -524,6 +549,7 @@ class LC3GUI(tk.Tk):
                 return
 
         self.lbl_file_info.config(text=os.path.basename(file_path))
+        self.disasm_base_addr = self.orig_pc
         self._update_all_views()
         self._scroll_to_pc()
 
@@ -548,7 +574,9 @@ class LC3GUI(tk.Tk):
             assembler.write_obj_file(temp_obj, orig, words)
             self.sim.load_obj(temp_obj)
             self.sim.symbols = {addr: name for name, addr in symbols.items()}
+            self.sim.symbols.update(getattr(self.sim, "os_symbols", {}))
             self.orig_pc = orig
+            self.disasm_base_addr = orig
             self.sim.reset(orig)
             self._update_all_views()
             self._scroll_to_pc()
@@ -597,12 +625,17 @@ class LC3GUI(tk.Tk):
         self.badge_p.config(bg="#2196F3" if (cc & FL_POS) else "#E0E0E0", fg="white" if (cc & FL_POS) else "#9E9E9E")
 
     def _update_disasm_view(self):
-        # Desensamblar un rango relevante alrededor del PC o desde la dirección de origen
+        # Desensamblar un rango relevante alrededor del PC o desde la dirección base
         self.tree_disasm.delete(*self.tree_disasm.get_children())
 
-        # Mostrar desde max(0, origen - 2) hasta origen + 120 palabras
-        start_addr = max(0, self.orig_pc - 2)
-        end_addr = min(MEMORY_SIZE, start_addr + 150)
+        # Si el PC está fuera del bloque actual, mover la base de visualización
+        cur_base = getattr(self, "disasm_base_addr", self.orig_pc)
+        if not (cur_base - 2 <= self.sim.pc < cur_base + 120):
+            cur_base = max(0, self.sim.pc - 2)
+            self.disasm_base_addr = cur_base
+
+        start_addr = max(0, cur_base - 2)
+        end_addr = min(MEMORY_SIZE, start_addr + 140)
 
         for addr in range(start_addr, end_addr):
             instr = self.sim.memory[addr]
@@ -625,6 +658,8 @@ class LC3GUI(tk.Tk):
 
     def _scroll_to_pc(self):
         item_id = f"addr_{self.sim.pc}"
+        if not self.tree_disasm.exists(item_id):
+            self._update_disasm_view()
         if self.tree_disasm.exists(item_id):
             self.tree_disasm.see(item_id)
             self.tree_disasm.selection_set(item_id)
@@ -633,12 +668,12 @@ class LC3GUI(tk.Tk):
         raw = self.ent_jump_addr.get().strip().replace("x", "").replace("X", "").replace("#", "")
         try:
             addr = int(raw, 16) & MASK_16
+            self.disasm_base_addr = addr
+            self._update_disasm_view()
             item_id = f"addr_{addr}"
             if self.tree_disasm.exists(item_id):
                 self.tree_disasm.see(item_id)
                 self.tree_disasm.selection_set(item_id)
-            else:
-                messagebox.showinfo("Dirección fuera de rango", f"x{addr:04X} no está visible en el bloque desensamblado actual.")
         except ValueError:
             pass
 
@@ -701,8 +736,13 @@ class LC3GUI(tk.Tk):
             return
 
         delay = self.sim_speed_ms.get()
-        # Si la velocidad es rápida (delay <= 10), ejecutamos ráfagas de instrucciones por tick
-        batch_size = 1 if delay > 15 else 40
+        # Si estamos esperando entrada del teclado por sondeo, no consumimos CPU en vano
+        if self.waiting_for_input:
+            batch_size = 1
+            step_delay = max(40, delay)
+        else:
+            batch_size = 1 if delay > 15 else 40
+            step_delay = max(1, delay)
 
         for _ in range(batch_size):
             if not self.sim.running:
@@ -713,7 +753,19 @@ class LC3GUI(tk.Tk):
                 self._stop_execution(f"Punto de interrupción alcanzado en x{self.sim.pc:04X}.")
                 return
 
+            if self._step_over_target is not None and self.sim.pc == self._step_over_target:
+                target = self._step_over_target
+                self._step_over_target = None
+                self._stop_execution(f"Step over completado. PC en x{target:04X}.")
+                return
+
             keep_going = self.sim.step()
+
+            if self._step_over_target is not None and self.sim.pc == self._step_over_target:
+                target = self._step_over_target
+                self._step_over_target = None
+                self._stop_execution(f"Step over completado. PC en x{target:04X}.")
+                return
 
             if self.sim.pc in self.breakpoints:
                 self._stop_execution(f"Punto de interrupción alcanzado en x{self.sim.pc:04X}.")
@@ -723,23 +775,39 @@ class LC3GUI(tk.Tk):
                 self._stop_execution("Procesador detenido.")
                 return
 
+            if self.waiting_for_input:
+                break
+
         self._update_all_views()
         self._scroll_to_pc()
 
         if self.is_running:
-            self.after(max(1, delay), self._run_loop)
+            self.after(step_delay, self._run_loop)
 
     def _on_pause(self):
         if not self.is_running and not self.waiting_for_input:
             return
         self.sim.running = False
+        self._step_over_target = None
         if self.waiting_for_input:
+            self.waiting_for_input = False
+            try:
+                self.ent_console_in.config(background="#FFFFFF")
+            except Exception:
+                pass
             self.input_var.set("pause")
         self._stop_execution("Ejecución pausada por el usuario.")
 
     def _stop_execution(self, status_msg: str):
         self.is_running = False
         self.sim.running = False
+        self._step_over_target = None
+        if self.waiting_for_input:
+            self.waiting_for_input = False
+            try:
+                self.ent_console_in.config(background="#FFFFFF")
+            except Exception:
+                pass
         self.btn_run.config(state=tk.NORMAL)
         self.btn_pause.config(state=tk.DISABLED)
         self.btn_step.config(state=tk.NORMAL)
@@ -768,32 +836,47 @@ class LC3GUI(tk.Tk):
 
         if is_sub:
             ret_addr = (self.sim.pc + 1) & MASK_16
-            temp_bp = ret_addr not in self.breakpoints
-            if temp_bp:
-                self.breakpoints.add(ret_addr)
-
             self.sim.running = True
-            try:
+            steps = 0
+            while self.sim.running and self.sim.pc != ret_addr and steps < 200:
+                if self.sim.pc in self.breakpoints:
+                    break
+                if self.waiting_for_input:
+                    break
                 self.sim.step()
-                while self.sim.running and self.sim.pc != ret_addr:
-                    if self.sim.pc in self.breakpoints:
-                        break
-                    self.sim.step()
-            finally:
-                if temp_bp:
-                    self.breakpoints.discard(ret_addr)
+                steps += 1
+
+            if self.sim.pc == ret_addr or not self.sim.running or self.sim.pc in self.breakpoints:
+                self._stop_execution(f"Step over completado. PC en x{self.sim.pc:04X}.")
+            else:
+                # Subrutina larga o esperando entrada de E/S por sondeo
+                self._step_over_target = ret_addr
+                self.is_running = True
+                self.btn_run.config(state=tk.DISABLED)
+                self.btn_pause.config(state=tk.NORMAL)
+                self.btn_step.config(state=tk.DISABLED)
+                self.btn_step_over.config(state=tk.DISABLED)
+                if not self.waiting_for_input:
+                    self.lbl_cpu_state.config(text="EJECUTANDO", bg="#1976D2")
+                self._run_loop()
         else:
             self.sim.step()
-
-        self._update_all_views()
-        self._scroll_to_pc()
-        self.lbl_status.config(text=f"Step over completado. PC en x{self.sim.pc:04X}.")
+            self._update_all_views()
+            self._scroll_to_pc()
+            self.lbl_status.config(text=f"Paso ejecutado. Próxima instrucción en x{self.sim.pc:04X}.")
 
     def _on_reset(self):
         self._on_pause()
+        self._step_over_target = None
         if self.waiting_for_input:
+            self.waiting_for_input = False
+            try:
+                self.ent_console_in.config(background="#FFFFFF")
+            except Exception:
+                pass
             self.input_var.set("reset")
         self.input_buffer.clear()
+        self.disasm_base_addr = self.orig_pc
         self.sim.reset(self.orig_pc)
         self._update_all_views()
         self._scroll_to_pc()

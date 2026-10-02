@@ -236,6 +236,98 @@ VALUE   .FILL #100
 
         self.assertIn("Hello, World!", output)
 
+    def test_os_vector_table_and_routines(self):
+        """Verifica que la tabla de vectores TRAP y el código del SO se carguen en memoria."""
+        sim = LC3Simulator()
+        self.assertEqual(sim.memory[0x0020], 0x0200)  # GETC
+        self.assertEqual(sim.memory[0x0021], 0x0206)  # OUT
+        self.assertEqual(sim.memory[0x0022], 0x020F)  # PUTS
+        self.assertEqual(sim.memory[0x0023], 0x0223)  # IN
+        self.assertEqual(sim.memory[0x0024], 0x0246)  # PUTSP
+        self.assertEqual(sim.memory[0x0025], 0x0273)  # HALT
+
+    def test_os_getc_polling_step_by_step(self):
+        """Verifica la ejecución del sondeo en GETC del SO paso a paso."""
+        code = """
+        .ORIG x3000
+        GETC
+        HALT
+        .END
+        """
+        asm = LC3Assembler()
+        orig, words, symbols = asm.assemble(code)
+        sim = LC3Simulator()
+        for i, w in enumerate(words):
+            sim.memory[orig + i] = w
+        sim.pc = orig
+        sim.running = True
+
+        # Paso 1: Salto a manejador GETC en x0200
+        sim.step()
+        self.assertEqual(sim.pc, 0x0200)
+        self.assertEqual(sim.reg[7], 0x3001)  # Retorno a usuario
+
+        # Paso 2: LDI R0, KBSR (sin tecla, retorna 0)
+        sim.step()
+        self.assertEqual(sim.pc, 0x0201)
+        self.assertEqual(sim.reg[0], 0x0000)
+
+        # Paso 3: BRzp x0200 (se toma el salto de sondeo)
+        sim.step()
+        self.assertEqual(sim.pc, 0x0200)
+
+        # Ahora el usuario presiona una tecla 'Z' (ASCII 90)
+        input_buf = [ord('Z')]
+        sim.input_fn = lambda: input_buf.pop(0)
+        sim.has_input_fn = lambda: len(input_buf) > 0
+
+        # Paso 4: LDI R0, KBSR (tecla lista -> bit 15 = 1, x8000)
+        sim.step()
+        self.assertEqual(sim.pc, 0x0201)
+        self.assertEqual(sim.reg[0], 0x8000)
+
+        # Paso 5: BRzp x0200 (no se toma el salto porque R0 es negativo)
+        sim.step()
+        self.assertEqual(sim.pc, 0x0202)
+
+        # Paso 6: LDI R0, KBDR (lee el carácter 90 'Z')
+        sim.step()
+        self.assertEqual(sim.pc, 0x0203)
+        self.assertEqual(sim.reg[0], ord('Z'))
+
+        # Paso 7: RET (retorna a x3001 en el código de usuario)
+        sim.step()
+        self.assertEqual(sim.pc, 0x3001)
+        self.assertEqual(sim.reg[0], ord('Z'))
+
+    def test_os_in_and_echo_execution(self):
+        """Verifica la ejecución de TRAP IN (x23) con eco en pantalla y retorno."""
+        code = """
+        .ORIG x3000
+        IN
+        HALT
+        .END
+        """
+        asm = LC3Assembler()
+        orig, words, symbols = asm.assemble(code)
+        sim = LC3Simulator()
+        for i, w in enumerate(words):
+            sim.memory[orig + i] = w
+        sim.pc = orig
+
+        input_buf = [ord('M')]
+        sim.input_fn = lambda: input_buf.pop(0)
+        sim.has_input_fn = lambda: len(input_buf) > 0
+
+        output_chars = []
+        sim.output_fn = lambda ch: output_chars.append(ch)
+
+        sim.run()
+        out_str = "".join(output_chars)
+        self.assertIn("Input a character: ", out_str)
+        self.assertIn("M", out_str)
+        self.assertEqual(sim.reg[0], ord('M'))
+
 
 if __name__ == "__main__":
     unittest.main()
