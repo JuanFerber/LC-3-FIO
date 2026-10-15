@@ -362,6 +362,7 @@ class LC3GUI(tk.Tk):
         self.ent_console_in = ttk.Entry(input_frame, font=("Consolas", 10))
         self.ent_console_in.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
         self.ent_console_in.bind("<Return>", lambda e: self._on_send_console_input())
+        self.ent_console_in.bind("<KeyPress>", self._on_entry_keypress)
 
         ttk.Button(input_frame, text="Enviar", command=self._on_send_console_input).pack(side=tk.LEFT, padx=2)
         ttk.Button(input_frame, text="Limpiar Consola", command=self._on_clear_console).pack(side=tk.RIGHT, padx=2)
@@ -465,6 +466,17 @@ class LC3GUI(tk.Tk):
             if char_code == 13:
                 char_code = 10
             self.input_buffer.append(char_code & 0xFF)
+            self.input_var.set("key_pressed")
+            return "break"
+
+    def _on_entry_keypress(self, event):
+        """Captura la pulsación de una tecla individual para sondeo inmediato en GETC / IN."""
+        if self.waiting_for_input and event.char:
+            char_code = ord(event.char)
+            if char_code == 13:
+                char_code = 10
+            self.input_buffer.append(char_code & 0xFF)
+            self.ent_console_in.delete(0, tk.END)
             self.input_var.set("key_pressed")
             return "break"
 

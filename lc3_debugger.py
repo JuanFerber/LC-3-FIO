@@ -154,6 +154,7 @@ Comandos del Depurador LC-3:
   set r<0-7> <val>      Modifica el valor de un registro (ej: set r0 #42 o set r1 xFF).
   set mem <addr> <val>  Modifica el valor en una dirección de memoria.
   set pc <addr>         Modifica el contador de programa (PC).
+  k, key <char|code>    Inyecta una tecla al registro de teclado para GETC/IN (ej: key a).
   reset                 Reinicia los registros y el PC a la dirección de origen.
   h, help               Muestra este menú de ayuda.
   q, quit, exit         Sale del depurador.
@@ -308,5 +309,33 @@ Comandos del Depurador LC-3:
                 print(f"Procesador reiniciado. PC = x{self.orig_pc:04X}.")
                 self.print_registers()
 
+            elif cmd in ("k", "key"):
+                if not args:
+                    print("Uso: key <carácter o código> (ej: key a o key 65)")
+                    continue
+                arg = args[0]
+                ch = ord(arg) if len(arg) == 1 else (int(arg) & 0xFF if arg.isdigit() else ord(arg[0]))
+                if not hasattr(self.sim, "_cli_dbg_buf"):
+                    self.sim._cli_dbg_buf = []
+                    self.sim.has_input_fn = lambda: len(self.sim._cli_dbg_buf) > 0
+                    self.sim.input_fn = lambda: self.sim._cli_dbg_buf.pop(0) if self.sim._cli_dbg_buf else 0
+                self.sim._cli_dbg_buf.append(ch)
+                print(f"[Teclado] Carácter '{chr(ch)}' (ASCII {ch}) cargado al búfer de teclado.")
+
             else:
-                print(f"Comando desconocido: '{cmd}'. Escribe 'help' para ver la lista de comandos.")
+                # Si el procesador está sondeando el teclado en el SO (GETC / IN) y se ingresa un solo carácter:
+                curr_pc = self.sim.pc
+                is_polling_keyboard = curr_pc in (0x0200, 0x0201, 0x0228, 0x0229)
+                if is_polling_keyboard and len(cmd) == 1:
+                    ch = ord(cmd)
+                    if not hasattr(self.sim, "_cli_dbg_buf"):
+                        self.sim._cli_dbg_buf = []
+                        self.sim.has_input_fn = lambda: len(self.sim._cli_dbg_buf) > 0
+                        self.sim.input_fn = lambda: self.sim._cli_dbg_buf.pop(0) if self.sim._cli_dbg_buf else 0
+                    self.sim._cli_dbg_buf.append(ch)
+                    print(f"[Teclado] Carácter '{cmd}' (ASCII {ch}) inyectado. Avanzando sondeo...")
+                    while self.sim.running and self.sim.pc in (0x0200, 0x0201, 0x0228, 0x0229):
+                        self.sim.step()
+                    self.print_registers()
+                else:
+                    print(f"Comando desconocido: '{cmd}'. Escribe 'help' para ver la lista de comandos.")

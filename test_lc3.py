@@ -328,6 +328,53 @@ VALUE   .FILL #100
         self.assertIn("M", out_str)
         self.assertEqual(sim.reg[0], ord('M'))
 
+    def test_debugger_keyboard_injection(self):
+        """Verifica que el depurador CLI pueda inyectar teclas durante el sondeo de GETC."""
+        code = """
+        .ORIG x3000
+        GETC
+        HALT
+        .END
+        """
+        asm = LC3Assembler()
+        orig, words, symbols = asm.assemble(code)
+        sim = LC3Simulator()
+        for i, w in enumerate(words):
+            sim.memory[orig + i] = w
+        from lc3_debugger import LC3Debugger
+        dbg = LC3Debugger(sim, orig)
+
+        # Avanzar hasta x0201 (BRzp GETC_HANDLER)
+        dbg.sim.step()  # Salto a x0200
+        dbg.sim.step()  # LDI R0, KBSR (0) -> PC en x0201
+        self.assertEqual(dbg.sim.pc, 0x0201)
+
+        # Inyectar 'K'
+        dbg.sim._cli_dbg_buf = [ord('K')]
+        dbg.sim.has_input_fn = lambda: len(dbg.sim._cli_dbg_buf) > 0
+        dbg.sim.input_fn = lambda: dbg.sim._cli_dbg_buf.pop(0)
+
+        # Paso: BRzp evalúa CC=Z (salta a x0200)
+        dbg.sim.step()
+        self.assertEqual(dbg.sim.pc, 0x0200)
+
+        # Paso: LDI R0, KBSR lee 0x8000 -> CC=N
+        dbg.sim.step()
+        self.assertEqual(dbg.sim.pc, 0x0201)
+        self.assertEqual(dbg.sim.reg[0], 0x8000)
+
+        # Paso: BRzp evalúa CC=N -> NO salta, avanza a x0202
+        dbg.sim.step()
+        self.assertEqual(dbg.sim.pc, 0x0202)
+
+        # Paso: LDI R0, KBDR lee 'K'
+        dbg.sim.step()
+        self.assertEqual(dbg.sim.reg[0], ord('K'))
+
+        # Paso: RET retorna a x3001
+        dbg.sim.step()
+        self.assertEqual(dbg.sim.pc, 0x3001)
+
 
 if __name__ == "__main__":
     unittest.main()
