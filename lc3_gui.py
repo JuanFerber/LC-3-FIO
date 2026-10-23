@@ -61,12 +61,12 @@ class LC3GUI(tk.Tk):
 
         # Cargar archivo inicial o ejemplo si se especifica
         if initial_file and os.path.isfile(initial_file):
-            self.load_file(initial_file)
+            self.load_file(initial_file, is_example=False)
         else:
-            # Intentar cargar hello.asm por defecto si existe
+            # Intentar cargar hello.asm por defecto si existe (como ejemplo, no como archivo de usuario)
             default_ex = os.path.join(os.path.dirname(__file__), "examples", "hello.asm")
             if os.path.isfile(default_ex):
-                self.load_file(default_ex)
+                self.load_file(default_ex, is_example=True)
             else:
                 self._update_all_views()
 
@@ -93,7 +93,7 @@ class LC3GUI(tk.Tk):
         # Menú Archivo
         menu_file = tk.Menu(menubar, tearoff=0)
         menu_file.add_command(label="Abrir archivo (.asm / .obj)...", command=self._on_open_file, accelerator="Ctrl+O")
-        menu_file.add_command(label="Ensamblar y Cargar archivo actual", command=self._on_assemble_and_load, accelerator="F5")
+        menu_file.add_command(label="Ensamblar y Cargar archivo actual (Editor)", command=self._on_assemble_and_load, accelerator="F5")
         menu_file.add_separator()
         menu_file.add_command(label="Cargar Ejemplo: Hello World", command=lambda: self._load_example("hello.asm"))
         menu_file.add_command(label="Cargar Ejemplo: Multiplicación", command=lambda: self._load_example("mult.asm"))
@@ -137,7 +137,6 @@ class LC3GUI(tk.Tk):
 
         # Botones de archivo
         ttk.Button(toolbar, text="📂 Abrir", style="Tool.TButton", command=self._on_open_file).pack(side=tk.LEFT, padx=3)
-        ttk.Button(toolbar, text="⚙️ Ensamblar y Cargar", style="Tool.TButton", command=self._on_assemble_and_load).pack(side=tk.LEFT, padx=3)
 
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
@@ -511,14 +510,14 @@ class LC3GUI(tk.Tk):
     def _load_example(self, example_name: str):
         ex_path = os.path.join(os.path.dirname(__file__), "examples", example_name)
         if os.path.isfile(ex_path):
-            self.load_file(ex_path)
+            self.load_file(ex_path, is_example=True)
         else:
             messagebox.showerror("Error", f"No se encontró el ejemplo '{example_name}'.")
 
-    def load_file(self, file_path: str):
+    def load_file(self, file_path: str, is_example: bool = False):
         """Carga un archivo .asm o .obj en el simulador y editor."""
         self._on_pause()
-        self.current_file = file_path
+        self.current_file = None if is_example else file_path
 
         if file_path.lower().endswith(".asm"):
             # Cargar texto en el editor
@@ -533,11 +532,21 @@ class LC3GUI(tk.Tk):
 
             # Auto-ensamblar
             try:
-                obj_path = file_path[:-4] + ".obj"
-                orig, count = assemble_file(file_path, obj_path=obj_path)
-                self.sim.load_obj(obj_path)
-                sym_path = file_path[:-4] + ".sym"
-                self.sim.load_sym(sym_path)
+                if is_example:
+                    assembler = LC3Assembler()
+                    orig, words, symbols = assembler.assemble(content)
+                    temp_obj = os.path.join(os.path.dirname(__file__), "_temp_editor.obj")
+                    assembler.write_obj_file(temp_obj, orig, words)
+                    self.sim.load_obj(temp_obj)
+                    self.sim.symbols = {addr: name for name, addr in symbols.items()}
+                    self.sim.symbols.update(getattr(self.sim, "os_symbols", {}))
+                    count = len(words)
+                else:
+                    obj_path = file_path[:-4] + ".obj"
+                    orig, count = assemble_file(file_path, obj_path=obj_path)
+                    self.sim.load_obj(obj_path)
+                    sym_path = file_path[:-4] + ".sym"
+                    self.sim.load_sym(sym_path)
                 self.orig_pc = orig
                 self.sim.reset(orig)
                 self.lbl_status.config(text=f"Ensamblado exitoso: {count} palabras desde x{orig:04X}.")
@@ -560,16 +569,24 @@ class LC3GUI(tk.Tk):
                 messagebox.showerror("Error al cargar binario", str(e))
                 return
 
-        self.lbl_file_info.config(text=os.path.basename(file_path))
+        display_name = f"[Ejemplo] {os.path.basename(file_path)}" if is_example else os.path.basename(file_path)
+        self.lbl_file_info.config(text=display_name)
         self.disasm_base_addr = self.orig_pc
         self._update_all_views()
         self._scroll_to_pc()
 
     def _on_assemble_and_load(self):
+        """Ensambla y carga el código que está actualmente en el editor.
+        Si hay un archivo de usuario abierto (.asm), guarda los cambios en disco primero.
+        Los programas de ejemplo nunca se consideran archivo actual de trabajo."""
         if self.current_file and self.current_file.lower().endswith(".asm"):
-            self.load_file(self.current_file)
-        else:
-            self._on_assemble_editor_code()
+            try:
+                code = self.txt_editor.get("1.0", tk.END)
+                with open(self.current_file, "w", encoding="utf-8") as f:
+                    f.write(code)
+            except Exception as e:
+                messagebox.showwarning("Advertencia", f"No se pudo guardar automáticamente en {self.current_file}: {e}")
+        self._on_assemble_editor_code()
 
     def _on_assemble_editor_code(self):
         """Ensambla el texto escrito actualmente en la pestaña del editor."""
@@ -581,10 +598,13 @@ class LC3GUI(tk.Tk):
         assembler = LC3Assembler()
         try:
             orig, words, symbols = assembler.assemble(code)
-            # Guardar temporalmente en un archivo para que sim lo mantenga
-            temp_obj = os.path.join(os.path.dirname(__file__), "_temp_editor.obj")
-            assembler.write_obj_file(temp_obj, orig, words)
-            self.sim.load_obj(temp_obj)
+            # Guardar en archivo .obj
+            if self.current_file and self.current_file.lower().endswith(".asm"):
+                obj_path = os.path.splitext(self.current_file)[0] + ".obj"
+            else:
+                obj_path = os.path.join(os.path.dirname(__file__), "_temp_editor.obj")
+            assembler.write_obj_file(obj_path, orig, words)
+            self.sim.load_obj(obj_path)
             self.sim.symbols = {addr: name for name, addr in symbols.items()}
             self.sim.symbols.update(getattr(self.sim, "os_symbols", {}))
             self.orig_pc = orig
